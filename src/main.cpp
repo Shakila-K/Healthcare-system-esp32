@@ -118,6 +118,12 @@ bool tempRequested = false;
 // ECG Variables
 int ecg = 0;
 
+// ECG Graph
+const int graphHeight = 40;
+const int graphYStart = 20;
+int graphX = 0;
+int lastY = graphYStart + graphHeight / 2;
+
 void getEcg()
 {
   if ((digitalRead(40) == 1) || (digitalRead(41) == 1))
@@ -155,6 +161,10 @@ void handleButton()
       {
         currentDisplayIndex = (currentDisplayIndex + 1) % 4;
         beepBuzzer();
+        if (currentDisplayIndex == 3)
+        {
+          display.clearDisplay();
+        }
       }
     }
   }
@@ -163,23 +173,25 @@ void handleButton()
 
 void updateDisplay()
 {
-
-  display.clearDisplay();
   display.setCursor(0, 0);
   display.setTextSize(1);
 
   switch (currentDisplayIndex)
   {
   case 0:
+    display.clearDisplay();
     display.println("Temperature");
     break;
   case 1:
+    display.clearDisplay();
     display.println("Heart Rate");
     break;
   case 2:
+    display.clearDisplay();
     display.println("SpO2 Level");
     break;
   case 3:
+    // display.fillRect(0, 0, SCREEN_WIDTH, 16, SSD1306_BLACK); // Clear only text area
     display.println("ECG Signal");
     break;
   }
@@ -209,13 +221,20 @@ void updateDisplay()
     display.setCursor(56, 32);
     display.setTextSize(2);
     display.print(average_spo2);
-    display.print("%");
+    display.print(" %");
     break;
 
   case 3:
-    display.setCursor(0, 32);
-    display.setTextSize(2);
-    display.print(ecg);
+    // Graph Section
+    if (graphX >= SCREEN_WIDTH)
+    {
+      display.fillRect(0, graphYStart, SCREEN_WIDTH, graphHeight + 1, SSD1306_BLACK);
+      graphX = 0;
+    }
+    int y = map(ecg, 0, 4095, graphYStart + graphHeight, graphYStart);
+    display.drawLine(graphX, lastY, graphX + 1, y, SSD1306_WHITE);
+    lastY = y;
+    graphX++;
     break;
   }
 
@@ -224,20 +243,66 @@ void updateDisplay()
   Serial.print(F("Temp= "));
   Serial.print(tempC);
 
-  Serial.print(F(", HR= "));
+  Serial.print(F(" , HR= "));
   Serial.print(bpm);
 
-  Serial.print(F(", SPO2= "));
+  Serial.print(F(" , SPO2= "));
   Serial.print(spo2);
 
-  Serial.print(F(",Avg HR= "));
+  Serial.print(F(" ,Avg HR= "));
   Serial.print(average_bpm);
 
-  Serial.print(F(",Avg SPO2= "));
+  Serial.print(F(" ,Avg SPO2= "));
   Serial.print(average_spo2);
 
-  Serial.print(F(", ECG= "));
+  Serial.print(F(" , ECG= "));
   Serial.println(ecg, DEC);
+}
+
+unsigned long lastAlertTime = 0;
+bool buzzerOn = false;
+unsigned long buzzerToggleInterval = 0;
+int alertLevel = 0; // 0: none, 1: mild, 2: serious
+
+void alert()
+{
+  // Determine alert level and interval
+  int newAlertLevel = 0;
+  unsigned long newInterval = 0;
+
+  // High-priority conditions
+  if ((average_bpm <= 40) || (average_bpm > 120) || (average_spo2 <= 90) || (tempC <= 36) || (tempC > 39))
+  {
+    newAlertLevel = 2;
+    newInterval = 200;
+  }
+  else if ((average_bpm > 40 && average_bpm <= 60) || (average_bpm > 100 && average_bpm <= 120) || (average_spo2 > 90 && average_spo2 < 94) || (tempC > 38 && tempC <= 39))
+  {
+    newAlertLevel = 1;
+    newInterval = 500;
+  }
+
+  // If alert condition changes, update
+  if (newAlertLevel != alertLevel)
+  {
+    alertLevel = newAlertLevel;
+    buzzerToggleInterval = newInterval;
+    lastAlertTime = millis();
+    buzzerOn = false;
+    digitalWrite(BUZZER, LOW);
+  }
+
+  // Handle buzzer toggling
+  if (alertLevel > 0 && millis() - lastAlertTime >= buzzerToggleInterval)
+  {
+    buzzerOn = !buzzerOn;
+    digitalWrite(BUZZER, buzzerOn ? HIGH : LOW);
+    lastAlertTime = millis();
+  }
+  else if (alertLevel == 0)
+  {
+    digitalWrite(BUZZER, LOW);
+  }
 }
 
 void setup()
@@ -329,8 +394,10 @@ void loop()
     // Reset values if the finger is removed
     differentiator.reset();
     averager_bpm.reset();
+    average_bpm = 0;
     averager_r.reset();
     averager_spo2.reset();
+    average_spo2 = 0;
     low_pass_filter_red.reset();
     low_pass_filter_ir.reset();
     high_pass_filter.reset();
@@ -450,4 +517,5 @@ void loop()
     last_diff = current_diff;
   }
   updateDisplay();
+  // alert();
 }
