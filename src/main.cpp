@@ -1,3 +1,53 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+
+const char *ssid = "<Wifi_SSID>";
+const char *password = "<Wifi_PW>";
+
+const char *mqtt_server = "<MQTT_SERVER>";
+const int mqtt_port = 8883;
+const char *mqtt_user = "<MQTT_USERNAME>";
+const char *mqtt_pass = "<MQTT_PW>";
+
+const char *data_topic = "esp32/data";
+const char *ecg_topic = "esp32/ecg";
+
+WiFiClientSecure espClient;
+PubSubClient client(espClient);
+
+void reconnect()
+{
+  while (!client.connected())
+  {
+    Serial.print("Connecting to MQTT...");
+    if (client.connect("ESP32Client", mqtt_user, mqtt_pass))
+    {
+      Serial.println("connected");
+    }
+    else
+    {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 sec");
+      delay(5000);
+    }
+  }
+}
+
+void callback(char *topic, byte *payload, unsigned int length)
+{
+  String msg;
+  for (int i = 0; i < length; i++)
+  {
+    msg += (char)payload[i];
+  }
+  Serial.print("Message received [");
+  Serial.print(topic);
+  Serial.print("]: ");
+  Serial.println(msg);
+}
+
 // MAX30102 Sensor
 #include <MAX3010x.h>
 #include "filters.h"
@@ -66,8 +116,26 @@ const unsigned char o2_icon[] PROGMEM = {
     0x00, 0x03, 0x02, 0x02, 0x03, 0x00, 0x0e, 0x03, 0x06, 0x01, 0xe0, 0x3c, 0x01, 0x8e, 0x00, 0x7f,
     0xe0, 0x00, 0xfc, 0x00, 0x00, 0x00, 0x00, 0x00};
 
+// 4. Breath
+const unsigned char breath_icon[] PROGMEM = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x63, 0x00, 0x00, 0x00,
+    0x00, 0x80, 0xc0, 0x00, 0x00, 0x01, 0x00, 0x40, 0x00, 0x20, 0x03, 0x00, 0x20, 0x00, 0x08, 0x02,
+    0x00, 0x20, 0x00, 0x04, 0x02, 0x00, 0x20, 0x00, 0x01, 0x84, 0x00, 0x20, 0x00, 0x00, 0xc4, 0x00,
+    0x20, 0x00, 0x00, 0x37, 0xf0, 0x20, 0x00, 0x00, 0x03, 0x08, 0x60, 0x00, 0x64, 0xf3, 0xa4, 0xc0,
+    0x00, 0x00, 0x03, 0x05, 0x80, 0x00, 0x00, 0x31, 0xe5, 0x00, 0x00, 0x00, 0xe0, 0xa1, 0x00, 0x00,
+    0x01, 0x80, 0xa5, 0x00, 0x00, 0x04, 0x00, 0x81, 0x00, 0x00, 0x08, 0xff, 0xa5, 0xff, 0x00, 0x23,
+    0x00, 0x24, 0x00, 0xc0, 0x06, 0x00, 0x04, 0x00, 0x60, 0x04, 0x00, 0x24, 0x00, 0x30, 0x08, 0x03,
+    0xe7, 0xc0, 0x10, 0x08, 0x04, 0x24, 0x20, 0x10, 0x10, 0x09, 0xa5, 0x90, 0x08, 0x10, 0x10, 0x66,
+    0x08, 0x08, 0x10, 0x14, 0xc3, 0x28, 0x08, 0x10, 0x90, 0xbd, 0x09, 0x08, 0x10, 0x90, 0xe7, 0x49,
+    0x08, 0x10, 0x94, 0x24, 0xe9, 0x08, 0x30, 0xd1, 0x24, 0x4b, 0x0c, 0x20, 0xd3, 0xa4, 0x8b, 0x04,
+    0x20, 0xd0, 0x24, 0x8b, 0x04, 0x20, 0xd0, 0xc3, 0x0b, 0x04, 0x21, 0xcf, 0x81, 0xf3, 0x84, 0x21,
+    0x40, 0x00, 0x02, 0x84, 0x21, 0x40, 0x00, 0x02, 0x84, 0x61, 0x60, 0x00, 0x06, 0x86, 0x7f, 0x3f,
+    0xff, 0xfc, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00};
+
 int BUZZER = 32;          // Buzzer connected to GPIO 32
 const int buttonPin = 13; // Push button connected to GPIO 13
+const int alertBtnPin = 25;
+const int led = 33;
 
 // Push button related variables
 bool buttonState = HIGH;
@@ -76,6 +144,16 @@ unsigned long lastDebounceTime = 0;
 const unsigned long debounceDelay = 50;
 unsigned long lastUpdate = 0;
 const unsigned long updateInterval = 50;
+
+// alert button related variables
+bool alertButtonState = HIGH;
+bool lastAlertButtonReading = HIGH;
+unsigned long lastAlertDebounceTime = 0;
+const unsigned long alertDebounceDelay = 50;
+unsigned long lastAlertUpdate = 0;
+const unsigned long alertUpdateInterval = 50;
+
+bool alertState = HIGH;
 
 // Sensor (adjust to your sensor type)
 MAX30105 sensor;
@@ -137,6 +215,16 @@ void getEcg()
   delay(1);
 }
 
+// Respiratory Rate Estimation
+const float kRespirationCutoff = 0.3; // Hz (~18 bpm max)
+LowPassFilter respiration_filter(kRespirationCutoff, kSamplingFrequency);
+
+int respiration_rate = 0;
+unsigned long last_rr_time = 0;
+int breath_count = 0;
+float last_resp_val = 0;
+bool rising = false;
+
 void beepBuzzer()
 {
   digitalWrite(BUZZER, HIGH);
@@ -159,9 +247,9 @@ void handleButton()
       buttonState = reading;
       if (buttonState == LOW)
       {
-        currentDisplayIndex = (currentDisplayIndex + 1) % 4;
+        currentDisplayIndex = (currentDisplayIndex + 1) % 5;
         beepBuzzer();
-        if (currentDisplayIndex == 3)
+        if (currentDisplayIndex == 4)
         {
           display.clearDisplay();
         }
@@ -169,6 +257,28 @@ void handleButton()
     }
   }
   lastButtonReading = reading;
+}
+void handleAlertButton()
+{
+  int reading = digitalRead(alertBtnPin);
+  if (reading != lastAlertButtonReading)
+  {
+    lastAlertDebounceTime = millis();
+  }
+
+  if ((millis() - lastAlertDebounceTime) > alertDebounceDelay)
+  {
+    if (reading != alertButtonState)
+    {
+      alertButtonState = reading;
+      if (alertButtonState == LOW)
+      {
+        alertState = !alertState;
+        digitalWrite(led, alertState);
+      }
+    }
+  }
+  lastAlertButtonReading = reading;
 }
 
 void updateDisplay()
@@ -191,6 +301,10 @@ void updateDisplay()
     display.println("SpO2 Level");
     break;
   case 3:
+    display.clearDisplay();
+    display.println("Respiration Rate");
+    break;
+  case 4:
     // display.fillRect(0, 0, SCREEN_WIDTH, 16, SSD1306_BLACK); // Clear only text area
     display.println("ECG Signal");
     break;
@@ -223,8 +337,15 @@ void updateDisplay()
     display.print(average_spo2);
     display.print(" %");
     break;
-
   case 3:
+    display.drawBitmap(4, 20, breath_icon, 40, 40, SSD1306_WHITE);
+    display.setCursor(56, 32);
+    display.setTextSize(2);
+    display.print(respiration_rate);
+    display.print(" bpm");
+    break;
+
+  case 4:
     // Graph Section
     if (graphX >= SCREEN_WIDTH)
     {
@@ -243,11 +364,11 @@ void updateDisplay()
   Serial.print(F("Temp= "));
   Serial.print(tempC);
 
-  Serial.print(F(" , HR= "));
-  Serial.print(bpm);
+  // Serial.print(F(" , HR= "));
+  // Serial.print(bpm);
 
-  Serial.print(F(" , SPO2= "));
-  Serial.print(spo2);
+  // Serial.print(F(" , SPO2= "));
+  // Serial.print(spo2);
 
   Serial.print(F(" ,Avg HR= "));
   Serial.print(average_bpm);
@@ -255,8 +376,38 @@ void updateDisplay()
   Serial.print(F(" ,Avg SPO2= "));
   Serial.print(average_spo2);
 
+  Serial.print(" , Respiratory Rate= ");
+  Serial.print(respiration_rate);
+
   Serial.print(F(" , ECG= "));
   Serial.println(ecg, DEC);
+}
+
+void estimateRespiratoryRate(float ir_signal)
+{
+  float filtered = respiration_filter.process(ir_signal);
+
+  // Basic zero-crossing peak detection (rising edge)
+  if (!rising && filtered > last_resp_val)
+  {
+    rising = true;
+  }
+  else if (rising && filtered < last_resp_val)
+  {
+    rising = false;
+    breath_count++;
+  }
+
+  last_resp_val = filtered;
+
+  // Update respiratory rate every 15 seconds
+  unsigned long now = millis();
+  if (now - last_rr_time > 15000)
+  {
+    respiration_rate = (breath_count * 60) / 15; // breaths per minute
+    breath_count = 0;
+    last_rr_time = now;
+  }
 }
 
 unsigned long lastAlertTime = 0;
@@ -271,15 +422,17 @@ void alert()
   unsigned long newInterval = 0;
 
   // High-priority conditions
-  if ((average_bpm <= 40) || (average_bpm > 120) || (average_spo2 <= 90) || (tempC <= 36) || (tempC > 39))
+  if ((average_bpm <= 40) || (average_bpm > 120) || (average_spo2 <= 90) || (tempC <= 36) || (tempC > 39) || (respiration_rate > 30) || (respiration_rate <= 8))
   {
     newAlertLevel = 2;
-    newInterval = 200;
+    newInterval = 100;
   }
-  else if ((average_bpm > 40 && average_bpm <= 60) || (average_bpm > 100 && average_bpm <= 120) || (average_spo2 > 90 && average_spo2 < 94) || (tempC > 38 && tempC <= 39))
+  else if ((average_bpm > 40 && average_bpm <= 60) || (average_bpm > 100 && average_bpm <= 120) ||
+           (average_spo2 > 90 && average_spo2 < 94) || (tempC > 38 && tempC <= 39) ||
+           (respiration_rate > 8 && respiration_rate <= 12) || (respiration_rate > 20 && respiration_rate <= 30))
   {
     newAlertLevel = 1;
-    newInterval = 500;
+    newInterval = 400;
   }
 
   // If alert condition changes, update
@@ -305,30 +458,16 @@ void alert()
   }
 }
 
+void syncData()
+{
+  String payload = "{\"temperature\": " + String(tempC) + ", \"hr\": " + String(average_bpm) + ", \"spo2\": " + String(average_spo2) + "}";
+  client.publish(data_topic, payload.c_str());
+  client.publish(ecg_topic, String(ecg).c_str());
+}
+
 void setup()
 {
   Serial.begin(115200);
-
-  if (sensor.begin() && sensor.setSamplingRate(kSamplingRate))
-  {
-    Serial.println("Sensor initialized");
-  }
-  else
-  {
-    Serial.println("Sensor not found");
-    while (1)
-      ;
-  }
-
-  // Temp Sensor Init
-  tempSensor.setResolution(9);
-  tempSensor.begin();
-
-  pinMode(buttonPin, INPUT_PULLUP); // internal pull-up
-  pinMode(BUZZER, OUTPUT);
-  // Define ECG Pins
-  pinMode(41, INPUT); // Setup for leads off detection LO +
-  pinMode(40, INPUT); // Setup for leads off detection LO -0
 
   // Display Init
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
@@ -339,7 +478,45 @@ void setup()
   }
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
-  display.display();
+
+  WiFi.begin(ssid, password);
+  display.println("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+    display.display();
+  }
+  Serial.println(" connected.");
+
+  espClient.setInsecure();
+
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+
+  if (sensor.begin() && sensor.setSamplingRate(kSamplingRate))
+  {
+    Serial.println("Max30102 initialized");
+  }
+  else
+  {
+    Serial.println("Max30102 not found");
+    while (1)
+      ;
+  }
+
+  // Temp Sensor Init
+  tempSensor.setResolution(9);
+  tempSensor.begin();
+
+  pinMode(buttonPin, INPUT_PULLUP); // internal pull-up
+  pinMode(BUZZER, OUTPUT);
+  pinMode(alertBtnPin, INPUT_PULLUP);
+  pinMode(led, OUTPUT);
+  digitalWrite(led, alertState);
+  // Define ECG Pins
+  pinMode(41, INPUT); // Setup for leads off detection LO +
+  pinMode(40, INPUT); // Setup for leads off detection LO -0
 }
 
 // Filter Instances
@@ -375,9 +552,19 @@ long crossed_time = 0;
 
 void loop()
 {
+  // MQTT Reconnect
+  if (!client.connected())
+  {
+    reconnect();
+  }
+  client.loop();
+
   handleButton();
+  handleAlertButton();
   getEcg();
   auto sample = sensor.readSample(1000);
+  // Collect respitory rate
+  estimateRespiratoryRate(sample.ir);
   float current_value_red = sample.red;
   float current_value_ir = sample.ir;
 
@@ -403,6 +590,7 @@ void loop()
     high_pass_filter.reset();
     stat_red.reset();
     stat_ir.reset();
+    tempC = 0;
 
     finger_detected = false;
     finger_timestamp = millis();
@@ -517,5 +705,13 @@ void loop()
     last_diff = current_diff;
   }
   updateDisplay();
-  // alert();
+  syncData();
+  if (alertState)
+  {
+    alert();
+  }
+  else
+  {
+    digitalWrite(BUZZER, LOW);
+  }
 }
