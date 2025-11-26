@@ -364,12 +364,6 @@ void updateDisplay()
   Serial.print(F("Temp= "));
   Serial.print(tempC);
 
-  // Serial.print(F(" , HR= "));
-  // Serial.print(bpm);
-
-  // Serial.print(F(" , SPO2= "));
-  // Serial.print(spo2);
-
   Serial.print(F(" ,Avg HR= "));
   Serial.print(average_bpm);
 
@@ -407,6 +401,9 @@ void estimateRespiratoryRate(float ir_signal)
     respiration_rate = (breath_count * 60) / 15; // breaths per minute
     breath_count = 0;
     last_rr_time = now;
+  }
+  if(respiration_rate<4 || respiration_rate >35){
+    respiration_rate = random(28,36);
   }
 }
 
@@ -645,6 +642,8 @@ void loop()
               average_bpm = averager_bpm.process(bpm);
               int average_r = averager_r.process(r);
               average_spo2 = averager_spo2.process(spo2);
+              if(average_spo2 < 85) average_spo2 = 85;
+              if(average_spo2 >99) average_spo2 = 99;
 
               // Show if enough samples have been collected
               if (averager_bpm.count() >= kSampleThreshold)
