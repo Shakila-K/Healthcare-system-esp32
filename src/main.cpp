@@ -560,8 +560,6 @@ void loop()
   handleAlertButton();
   getEcg();
   auto sample = sensor.readSample(1000);
-  // Collect respitory rate
-  estimateRespiratoryRate(sample.ir);
   float current_value_red = sample.red;
   float current_value_ir = sample.ir;
 
@@ -588,6 +586,7 @@ void loop()
     stat_red.reset();
     stat_ir.reset();
     tempC = 0;
+    respiration_rate = 0;
 
     finger_detected = false;
     finger_timestamp = millis();
@@ -595,6 +594,10 @@ void loop()
 
   if (finger_detected)
   {
+
+    // Collect respitory rate
+    estimateRespiratoryRate(sample.ir);
+
     current_value_red = low_pass_filter_red.process(current_value_red);
     current_value_ir = low_pass_filter_ir.process(current_value_ir);
 
